@@ -1,4 +1,3 @@
-
 name: Android Build and Tests
 
 on:
@@ -25,12 +24,39 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK 37
+      - name: Check Android SDK
+        shell: bash
         run: |
-          sdkmanager "platform-tools" "platforms;android-37"
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+
+          if [ -z "$SDK_ROOT" ]; then
+            echo "::error::Android SDK environment variable is missing"
+            exit 1
+          fi
+
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -x "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager not found at $SDKMANAGER"
+            exit 1
+          fi
+
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+
+      - name: Accept Android SDK licenses
+        shell: bash --noprofile --norc -e {0}
+        run: |
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses
+
+      - name: Install required Android SDK packages
+        run: |
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
+            "platform-tools" \
+            "platforms;android-37"
+
+      - name: Show installed SDK packages
+        run: |
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --list_installed
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -39,12 +65,37 @@ jobs:
         run: chmod +x gradlew
 
       - name: Run unit tests
-        run: ./gradlew testDebugUnitTest
+        id: unit_tests
+        run: ./gradlew testDebugUnitTest --stacktrace
 
       - name: Build debug APK
-        run: ./gradlew assembleDebug
+        id: build_apk
+        if: ${{ !cancelled() && (success() || steps.unit_tests.outcome == 'failure') }}
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Verify APK exists and is non-empty
+        id: verify_apk
+        if: ${{ always() && !cancelled() && steps.build_apk.outcome == 'success' }}
+        run: |
+          APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ ! -s "$APK_PATH" ]; then
+            echo "::error::APK not found or empty at $APK_PATH"
+            exit 1
+          fi
+
+          echo "APK size: $(stat -c%s "$APK_PATH") bytes"
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-reports
+          path: app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
 
       - name: Upload APK
+        if: ${{ always() && !cancelled() && steps.verify_apk.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: Agent-debug-APK
